@@ -239,7 +239,7 @@ contract FairBet is FairBetAccessControl {
         uint256 _createTime,
         uint256 _amount
     )
-    public
+    external
     returns (bool) {
         require(_isEventPayable(_eventId));
 
@@ -264,8 +264,33 @@ contract FairBet is FairBetAccessControl {
         return true;
     }
 
-    function claimRefund() {
+    function claimRefund(
+        uint256 _eventId,
+        bytes32 _betCode,
+        uint256 _betId,
+        uint256 _createTime,
+        uint256 _amount
+    )
+    external
+    returns (bool) {
+        // Check that the bet is registered
+        require(_isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount));
 
+        BetEvent storage currEvent = events[_eventId];
+
+        if (currEvent.betCodes[_betCode].status != BetCodeStatus.Refund) {
+            return false;
+        }
+
+        // Avoid user can claim again win for his bet
+        currEvent.betHashes[_betId] = bytes32(0);
+
+        currEvent.betGroups[currEvent.betCodes[_betCode].group].amountReturned += _amount;
+        msg.sender.transfer(_amount);
+    }
+
+    function checkBetValidity(uint256 _eventId, bytes32 _betCode, uint256 _betId, uint256 _createTime, uint256 _amount) public view returns (bool) {
+        return _isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount);
     }
 
     function _isEventActive(uint256 _eventId) internal view returns (bool) {
