@@ -241,25 +241,31 @@ contract FairBet is FairBetAccessControl {
     )
     public
     returns (bool) {
-        // Check that the event is payable and that bet-code has been set as winning by bookmaker
-        if (!_isEventPayable(_eventId) || !_isBetCodeWinning(_eventId, _betCode)) {
-            return false;
-        }
+        require(_isEventPayable(_eventId));
 
-        if (!_isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount)) {
+        // Check that the bet-code has been set as winning by bookmaker and bet is registered
+        if (
+            !_isBetCodeWinning(_eventId, _betCode) ||
+            !_isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount)) {
             return false;
         }
 
         BetEvent storage currEvent = events[_eventId];
+        BetGroup storage currBetGroup = currEvent.betGroups[currEvent.betCodes[_betCode].group];
 
         // Avoid user can claim again win for his bet
         currEvent.betHashes[_betId] = bytes32(0);
 
         // Calculate amount to send
-        var reward = _amount * currEvent.betgroupAmounts[currEvent.allowedBetCodes[_betCode]] / currEvent.betcodeAmounts[_betCode];
+        var reward = _amount * currBetGroup.amountBet / currEvent.betCodes[_betCode].amountBet;
+        currBetGroup.amountReturned += reward;
 
         msg.sender.transfer(reward);
         return true;
+    }
+
+    function claimRefund() {
+
     }
 
     function _isEventActive(uint256 _eventId) internal view returns (bool) {
@@ -312,7 +318,6 @@ contract FairBet is FairBetAccessControl {
     }
 
     function _isBetCodeWinning(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
-        BetEvent storage currEvent = events[_eventId];
-        return (currEvent.winningBetCodes[currEvent.allowedBetCodes[_betCode]] == _betCode);
+        return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Winning);
     }
 }
