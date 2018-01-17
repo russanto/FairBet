@@ -2,8 +2,18 @@ pragma solidity 0.4.19;
 
 
 contract FairBetAccessControl {
-    address public ceo;
+    address public ceoAddress;
+    address public cfoAddress;
     address public bookmakersManager;
+
+    ContractStatus public contractStatus = ContractStatus.Opened;
+
+    enum ContractStatus {
+        Paused,
+        BetClaim,
+        BetAllow,
+        Opened
+    }
 
     enum BookmakerStatus {
         Banned,
@@ -14,7 +24,7 @@ contract FairBetAccessControl {
     mapping(address => BookmakerStatus) public bookmakers;
 
     modifier onlyCeo {
-        require(ceo == msg.sender);
+        require(ceoAddress == msg.sender);
         _;
     }
 
@@ -28,12 +38,36 @@ contract FairBetAccessControl {
         _;
     }
 
+    modifier claimAllowed {
+        require(uint8(contractStatus) > 0);
+        _;
+    }
+
+    modifier betAllowed {
+        require(uint8(contractStatus) > 1);
+        _;
+    }
+
+    modifier eventCreationAllowed {
+        require(uint8(contractStatus) > 2);
+        _;
+    }
+
     function setCEO(address _newCEO) external onlyCeo {
-        ceo = _newCEO;
+        ceoAddress = _newCEO;
+    }
+
+    function setCFO(address _newCFO) external onlyCeo {
+        cfoAddress = _newCFO;
     }
 
     function setBookmakerManager(address _newBookmakersManager) external onlyCeo {
         bookmakersManager = _newBookmakersManager;
+    }
+
+    function changeContractStatus(ContractStatus _newStatus) external onlyCeo {
+        require(uint(_newStatus) < 4);
+        contractStatus = _newStatus;
     }
 
     function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
@@ -125,7 +159,7 @@ contract FairBet is FairBetAccessControl {
     }
 
     function FairBet() public {
-        ceo = msg.sender;
+        ceoAddress = msg.sender;
         bookmakersManager = msg.sender;
     }
 
@@ -138,6 +172,7 @@ contract FairBet is FairBetAccessControl {
     )
         public
         allowedBookmaker
+        eventCreationAllowed
         returns (uint256 eventId)
     {
         require((_endsAfter > _activeAfter) && (_payableAfter > _endsAfter));
@@ -154,7 +189,7 @@ contract FairBet is FairBetAccessControl {
         allowBetGroup(eventId, STD_BET_GROUP, _stdAllowedBetCodes);
     }
 
-    function allowBetGroup(uint256 _eventId, bytes32 _group, bytes32[] _betCodesToAllow) public {
+    function allowBetGroup(uint256 _eventId, bytes32 _group, bytes32[] _betCodesToAllow) public eventCreationAllowed {
         require(_isEventBookmaker(_eventId, msg.sender));
         require(_group != "");
         require(_betCodesToAllow.length <= 2**8);
@@ -175,7 +210,7 @@ contract FairBet is FairBetAccessControl {
         BetGroupAllowed(_eventId, _group, _betCodesToAllow);
     }
 
-    function bet(uint256 _eventId, bytes32 _betCode) public payable returns (uint256 betId) {
+    function bet(uint256 _eventId, bytes32 _betCode) public payable betAllowed returns (uint256 betId) {
         require(_isEventActive(_eventId));
         require(_isBetCodeAllowed(_eventId, _betCode));
         BetEvent storage currEvent = events[_eventId];
@@ -191,7 +226,7 @@ contract FairBet is FairBetAccessControl {
         currEvent.betCodes[_betCode].amountBet += msg.value;
     }
 
-    function awardWin(uint256 _eventId, bytes32 _betCode) public returns (bool) {
+    function awardWin(uint256 _eventId, bytes32 _betCode) public claimAllowed returns (bool) {
         require(
             _isEventPayable(_eventId) &&
             _isEventBookmaker(_eventId, msg.sender) &&
@@ -221,7 +256,7 @@ contract FairBet is FairBetAccessControl {
         }
     }
 
-    function claimWin(uint256 _betId) public {
+    function claimWin(uint256 _betId) public claimAllowed {
 
         Bet storage currBet = bets[_betId];
         BetEvent storage currEvent = events[currBet.eventId];
@@ -245,7 +280,7 @@ contract FairBet is FairBetAccessControl {
         msg.sender.transfer(reward);
     }
 
-    function claimRefund(uint256 _betId) public {
+    function claimRefund(uint256 _betId) public claimAllowed {
 
         Bet storage currBet = bets[_betId];
         BetEvent storage currEvent = events[currBet.eventId];
@@ -264,7 +299,7 @@ contract FairBet is FairBetAccessControl {
         msg.sender.transfer(currBet.amount);
     }
 
-    function checkBetOwner(address _owner, uint256 _betId) public view returns (bool) {
+    function checkBetOwner(address _owner, uint256 _betId) public claimAllowed view returns (bool) {
         return (bets[_betId].bettor == _owner);
     }
 
