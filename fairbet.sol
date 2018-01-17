@@ -38,7 +38,7 @@ contract FairBetAccessControl {
     function isBookmakerStatusAtLeast(
         address _bookmaker,
         BookmakerStatus _status
-    ) public returns (bool) {
+    ) public view returns (bool) {
         return uint8(bookmakers[_bookmaker]) >= uint8(_status);
     }
 }
@@ -90,8 +90,8 @@ contract FairBet is FairBetAccessControl {
         // delay to award winners and claim prizes
         uint256 payableAfter;
 
-        // Hashes of bets
-        bytes32[] betHashes;
+        // Storage of bets
+        Bet[] bets;
 
         // Stores the groups of possible bets. BetGroupCode as key and the bet group data as value
         mapping(bytes32 => BetGroup) betGroups;
@@ -121,6 +121,7 @@ contract FairBet is FairBetAccessControl {
         bytes32 betCode;
         uint256 amount;
         uint256 createTime;
+        bool payed;
     }
 
     struct BetGroup {
@@ -191,18 +192,17 @@ contract FairBet is FairBetAccessControl {
         BetGroupAllowed(_eventId, _group, _betCodesToAllow);
     }
 
-    function bet(uint256 _eventId, bytes32 _betCode) public payable returns (uint256 createTime, uint256 betId) {
+    function bet(uint256 _eventId, bytes32 _betCode) public payable returns (uint256 betId) {
         require(_isEventActive(_eventId));
         require(_isBetCodeAllowed(_eventId, _betCode));
         BetEvent storage currEvent = events[_eventId];
-        createTime = now;
-        var currBet = Bet({
+        betId = currEvent.bets.push(Bet({
             bettor: msg.sender,
             betCode: _betCode,
             amount: msg.value,
-            createTime: createTime
-        });
-        betId = currEvent.betHashes.push(keccak256(currBet)) - 1;
+            createTime: now,
+            payed: false
+        })) - 1;
         currEvent.betGroups[currEvent.betCodes[_betCode].group].amountBet += msg.value;
         currEvent.betCodes[_betCode].amountBet += msg.value;
     }
@@ -234,63 +234,57 @@ contract FairBet is FairBetAccessControl {
 
     function claimWin(
         uint256 _eventId,
-        bytes32 _betCode,
-        uint256 _betId,
-        uint256 _createTime,
-        uint256 _amount
+        uint256 _betId
     )
-    external
-    returns (bool) {
-        require(_isEventPayable(_eventId));
-
-        // Check that the bet-code has been set as winning by bookmaker and bet is registered
-        if (
-            !_isBetCodeWinning(_eventId, _betCode) ||
-            !_isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount)) {
-            return false;
-        }
+    external {
 
         BetEvent storage currEvent = events[_eventId];
-        BetGroup storage currBetGroup = currEvent.betGroups[currEvent.betCodes[_betCode].group];
+        Bet storage currBet = currEvent.bets[_betId];
+
+        // Bet code must be marked as winning and checks bet owner
+        require(
+            _isBetCodeWinning(_eventId, currBet.betCode) &&
+            checkBetOwner(msg.sender, _eventId, _betId) &&
+            !currBet.payed
+        );
+
+        BetGroup storage currBetGroup = currEvent.betGroups[currEvent.betCodes[currBet.betCode].group];
 
         // Avoid user can claim again win for his bet
-        currEvent.betHashes[_betId] = bytes32(0);
+        currBet.payed = true;
 
         // Calculate amount to send
-        var reward = _amount * currBetGroup.amountBet / currEvent.betCodes[_betCode].amountBet;
+        var reward = currBet.amount * currBetGroup.amountBet / currEvent.betCodes[currBet.betCode].amountBet;
         currBetGroup.amountReturned += reward;
 
         msg.sender.transfer(reward);
-        return true;
     }
 
     function claimRefund(
         uint256 _eventId,
-        bytes32 _betCode,
-        uint256 _betId,
-        uint256 _createTime,
-        uint256 _amount
+        uint256 _betId
     )
     external
-    returns (bool) {
-        // Check that the bet is registered
-        require(_isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount));
-
+    {
         BetEvent storage currEvent = events[_eventId];
+        Bet storage currBet = currEvent.bets[_betId];
 
-        if (currEvent.betCodes[_betCode].status != BetCodeStatus.Refund) {
-            return false;
-        }
+        // Bet code must be marked as refundable and checks bet owner
+        require(
+            _isBetCodeRefundable(_eventId, currBet.betCode) &&
+            checkBetOwner(msg.sender, _eventId, _betId) &&
+            !currBet.payed
+        );
 
-        // Avoid user can claim again win for his bet
-        currEvent.betHashes[_betId] = bytes32(0);
+        // Avoid user can claim again refund for his bet
+        currBet.payed = true;
 
-        currEvent.betGroups[currEvent.betCodes[_betCode].group].amountReturned += _amount;
-        msg.sender.transfer(_amount);
+        currEvent.betGroups[currEvent.betCodes[currBet.betCode].group].amountReturned += currBet.amount;
+        msg.sender.transfer(currBet.amount);
     }
 
-    function checkBetValidity(uint256 _eventId, bytes32 _betCode, uint256 _betId, uint256 _createTime, uint256 _amount) public view returns (bool) {
-        return _isBetRegistered(_eventId, _betCode, _betId, _createTime, _amount);
+    function checkBetOwner(address _owner, uint256 _eventId, uint256 _betId) public view returns (bool) {
+        return (events[_eventId].bets[_betId].bettor == _owner);
     }
 
     function _isEventActive(uint256 _eventId) internal view returns (bool) {
@@ -323,26 +317,15 @@ contract FairBet is FairBetAccessControl {
         return (events[_eventId].bookmaker == _bookmaker);
     }
 
-    function _isBetRegistered(uint256 _eventId, bytes32 _betCode, uint256 _betId, uint256 _createTime, uint256 _amount) internal view returns (bool) {
-        var currBet = Bet({
-            bettor: msg.sender,
-            betCode: _betCode,
-            amount: _amount,
-            createTime: _createTime
-        });
-
-        if (events[_eventId].betHashes[_betId] != keccak256(currBet)) {
-            return false;
-        } else {
-            return true;
-        }
-    }
-
     function _isBetCodeAllowed(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
         return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Allowed);
     }
 
     function _isBetCodeWinning(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
         return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Winning);
+    }
+
+    function _isBetCodeRefundable(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
+        return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Refund);
     }
 }
