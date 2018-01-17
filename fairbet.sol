@@ -23,6 +23,11 @@ contract FairBetAccessControl {
         _;
     }
 
+    modifier allowedBookmaker {
+        require(uint8(bookmakers[msg.sender]) >= uint8(BookmakerStatus.Allowed));
+        _;
+    }
+
     function setCEO(address _newCEO) external onlyCeo {
         ceo = _newCEO;
     }
@@ -33,13 +38,6 @@ contract FairBetAccessControl {
 
     function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
         bookmakers[_bookmaker] = _newStatus;
-    }
-
-    function isBookmakerStatusAtLeast(
-        address _bookmaker,
-        BookmakerStatus _status
-    ) public view returns (bool) {
-        return uint8(bookmakers[_bookmaker]) >= uint8(_status);
     }
 }
 
@@ -139,9 +137,9 @@ contract FairBet is FairBetAccessControl {
         bytes32[] _stdAllowedBetCodes
     )
         public
+        allowedBookmaker
         returns (uint256 eventId)
     {
-        require(isBookmakerStatusAtLeast(msg.sender, BookmakerStatus.Allowed));
         require((_endsAfter > _activeAfter) && (_payableAfter > _endsAfter));
         BetEvent memory newEvent = BetEvent({
             bookmaker: msg.sender,
@@ -223,7 +221,7 @@ contract FairBet is FairBetAccessControl {
         }
     }
 
-    function claimWin(uint256 _betId) external {
+    function claimWin(uint256 _betId) public {
 
         Bet storage currBet = bets[_betId];
         BetEvent storage currEvent = events[currBet.eventId];
@@ -247,7 +245,7 @@ contract FairBet is FairBetAccessControl {
         msg.sender.transfer(reward);
     }
 
-    function claimRefund(uint256 _betId) external {
+    function claimRefund(uint256 _betId) public {
 
         Bet storage currBet = bets[_betId];
         BetEvent storage currEvent = events[currBet.eventId];
