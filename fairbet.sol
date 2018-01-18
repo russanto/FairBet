@@ -9,10 +9,11 @@ contract Upgradable {
 
     function upgradeContract(address _upgradedContractAddress) public {
         newContractAddress = _upgradedContractAddress;
+        ContractUpgrade(newContractAddress);
     }
 }
 
-contract FairBetAccessControl {
+contract FairBetAccessControl is Upgradable {
     address public ceoAddress;
     address public cfoAddress;
     address public bookmakersManager;
@@ -54,6 +55,11 @@ contract FairBetAccessControl {
         _;
     }
 
+    modifier atMostClaim {
+        require(uint8(contractStatus) < 2);
+        _;
+    }
+
     modifier claimAllowed {
         require(uint8(contractStatus) > 0);
         _;
@@ -82,17 +88,25 @@ contract FairBetAccessControl {
     }
 
     function changeContractStatus(ContractStatus _newStatus) external onlyCeo {
-        require(uint(_newStatus) < 4);
+        if (newContractAddress != address(0))
+            require(uint8(_newStatus) < uint(contractStatus));
         contractStatus = _newStatus;
     }
 
     function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
         bookmakers[_bookmaker] = _newStatus;
     }
+
+    function upgradeContract(address _upgradedContractAddress) public onlyCeo atMostClaim {
+        super.upgradeContract(_upgradedContractAddress);
+    }
 }
 
+contract FairBetFee is FairBetAccessControl {
+    uint256 public betCodeCreationFee;
+}
 
-contract FairBet is FairBetAccessControl, Upgradable {
+contract FairBet is FairBetFee {
 
     BetEvent[] public events;
 
@@ -100,13 +114,19 @@ contract FairBet is FairBetAccessControl, Upgradable {
 
     bytes16 public constant STD_BET_GROUP = "STD_BET_GROUP";
 
+
+    event DonationReceived(
+        address from,
+        uint256 amount
+    );
+
     event BetEventCreated(
         uint256 id,
         string description,
         uint64 createTime,
-        uint8 activeAfter,
-        uint16 endsAfter,
-        uint32 payableAfter
+        uint64 activeAfterTime,
+        uint64 endsAfterTime,
+        uint64 payableAfterTime
     );
 
     event BetGroupAllowed(
@@ -122,23 +142,23 @@ contract FairBet is FairBetAccessControl, Upgradable {
     );
 
     struct BetEvent {
+        // Bookmaker is the main responsible of the event
+        address bookmaker;
+
         // time bet event has been created in seconds (block timestamp)
         uint64 createTime;
 
-        // delay from createTime to begin accepting bets in minutes
-        uint8 activeAfter;
+        // delay from createTime to begin accepting bets
+        uint64 activeAfterTime;
 
-        // delay to stop accepting bets in seconds
-        uint16 endsAfter;
+        // delay to stop accepting bets
+        uint64 endsAfterTime;
 
-        // delay to award winners and claim prizes in seconds
-        uint32 payableAfter;
+        // delay to award winners and claim prizes
+        uint64 payableAfterTime;
 
         // Description of the event
         string description;
-
-        // Bookmaker is the main responsible of the event
-        address bookmaker;
 
         // Stores the groups of possible bets. BetGroupCode as key and the bet group data as value
         mapping(bytes16 => BetGroup) betGroups;
@@ -174,14 +194,40 @@ contract FairBet is FairBetAccessControl, Upgradable {
         Denied, Allowed, Winning, Refund
     }
 
+    /**
+     * Constructor set contract creator as CEO, CFO and BookmakersManager
+     */
     function FairBet() public {
         ceoAddress = msg.sender;
+        cfoAddress = msg.sender;
         bookmakersManager = msg.sender;
     }
 
+    function() payable public {
+        DonationReceived(msg.sender, msg.value);
+    }
+
+    /**
+     * Function to create events on which bet.
+     * Only bookmakers allowed by bookmakers manager can create events.
+     *
+     * A default bet-group is created. Bet-groups are immutable and can only be
+     * overwritten if and only if there aren't bets on them
+     *
+     * @notice Provide meaningful bet-codes because, with the eventId, they're enough to place bets.
+     * @notice Bet-codes must be unique inside the same event, regardless the group they belong to.
+     *
+     * @param _description A custom description string for the event
+     * @param _activeAfter # of minutes starting from now when begin accepting bets
+     * @param _endsAfter # of minutes starting from now when end accepting bets
+     * @param _payableAfter # of minutes starting from now when bettor can select winner bet-code
+     * @param _stdAllowedBetCodes list of bet-code to assign to a std group for the event
+     *
+     * @return eventId the ID of the newly created event
+     */
     function createEvent(
         string _description,
-        uint8 _activeAfter,
+        uint16 _activeAfter,
         uint16 _endsAfter,
         uint32 _payableAfter,
         bytes16[] _stdAllowedBetCodes
@@ -191,21 +237,43 @@ contract FairBet is FairBetAccessControl, Upgradable {
         eventCreationAllowed
         returns (uint256 eventId)
     {
-        require((_endsAfter > _activeAfter) && (_payableAfter > _endsAfter));
+        require((_endsAfter > _activeAfter) && (_payableAfter > uint32(_endsAfter)));
         BetEvent memory newEvent = BetEvent({
             bookmaker: msg.sender,
             description: _description,
             createTime: uint64(now),
-            activeAfter: _activeAfter,
-            endsAfter: _endsAfter,
-            payableAfter: _payableAfter
+            activeAfterTime: uint64(now) + (_activeAfter * 1 minutes),
+            endsAfterTime: uint64(now) + (_endsAfter * 1 minutes),
+            payableAfterTime: uint64(now) + (_payableAfter * 1 minutes)
         });
         eventId = events.push(newEvent) - 1;
         BetEventCreated(eventId, _description, newEvent.createTime, _activeAfter, _endsAfter, _payableAfter);
         allowBetGroup(eventId, STD_BET_GROUP, _stdAllowedBetCodes);
     }
 
-    function allowBetGroup(uint256 _eventId, bytes16 _group, bytes16[] _betCodesToAllow) public eventCreationAllowed {
+    /**
+     * Bookmakers of the BetEvent can create multiple bet-groups for their event.
+     * Bet-groups are immutable and can only be overwritten if and only if
+     * there aren't bets on them
+     * Call again this function with the same group-code to overwrite that group
+     *
+     * @notice Bet-group code that you provide here is not necessary for placing bets.
+     *  Bet-group code is only necessary if you want to overwrite that group of bet-codes.
+     * @notice Provide meaningful bet-codes because, with the eventId, they're enough to place bets.
+     * @notice Bet-codes must be unique inside the same event, regardless the group they belong to.
+     *
+     * @param _eventId BetEvent ID to which add Bet-groups
+     * @param _group A code to assign to the group. It must be unique for the event unless you want to overwrite an existing bet-group.
+     * @param _betCodesToAllow List of codes on which bettor can bet.
+     */
+    function allowBetGroup(
+        uint256 _eventId,
+        bytes16 _group,
+        bytes16[] _betCodesToAllow
+    )
+    public
+    eventCreationAllowed
+    {
         BetEvent storage currEvent = events[_eventId];
 
         require(
@@ -231,6 +299,16 @@ contract FairBet is FairBetAccessControl, Upgradable {
         BetGroupAllowed(_eventId, _group, _betCodesToAllow);
     }
 
+    /**
+     * Place a bet on the event on the provided bet-code
+     *
+     * @notice Please, keep in mind or store the bet ID returned from this function. It is necessary to claim your win or refound.
+     *
+     * @param _eventId The event ID on which place the bet
+     * @param _betCode The code of the bet to place
+     *
+     * @return betId Bet ID of the successfully placed bet
+     */
     function bet(uint256 _eventId, bytes16 _betCode) public payable betAllowed returns (uint256 betId) {
         BetEvent storage currEvent = events[_eventId];
         require(
@@ -249,6 +327,19 @@ contract FairBet is FairBetAccessControl, Upgradable {
         currEvent.betCodes[_betCode].amountBet += msg.value;
     }
 
+    /**
+     * Declares a bet-code winning for a bet-group and allow related bets to claim their win.
+     * Be careful because this function operation can't be undone
+     *
+     * @notice ONLY 1 bet-code can be awarded to be winning for each bet-group.
+     *
+     * @param _eventId Your event ID
+     * @param _betCode Winning bet-code
+     *
+     * @return true if there were bets on the winning bet-code: this will allow win claiming
+     *  false if there weren't bets on the winning bet-code: this will allow bet refound for losers
+     *
+     */
     function awardWin(uint256 _eventId, bytes16 _betCode) public claimAllowed returns (bool) {
         BetEvent storage currEvent = events[_eventId];
 
@@ -280,6 +371,11 @@ contract FairBet is FairBetAccessControl, Upgradable {
         }
     }
 
+    /**
+     * Called by bettor who wants to claim for his winning bet.
+     *
+     * @param _betId Unique bet ID obtained when bet was placed
+     */
     function claimWin(uint256 _betId) public claimAllowed {
 
         Bet storage currBet = bets[_betId];
@@ -304,6 +400,11 @@ contract FairBet is FairBetAccessControl, Upgradable {
         msg.sender.transfer(reward);
     }
 
+    /**
+     * Called by bettor who wants to claim for his refound when no one bet on the winning bet-code.
+     *
+     * @param _betId Unique bet ID obtained when bet was placed
+     */
     function claimRefund(uint256 _betId) public claimAllowed {
 
         Bet storage currBet = bets[_betId];
@@ -323,34 +424,38 @@ contract FairBet is FairBetAccessControl, Upgradable {
         msg.sender.transfer(currBet.amount);
     }
 
+    /**
+     * Check that address is the owner of the provided bet ID
+     *
+     * @param _owner the address to verify
+     * @param _betId the ID of the bet to check
+     *
+     * @return true if address is owner, otherwise false
+     */
     function checkBetOwner(address _owner, uint256 _betId) public claimAllowed view returns (bool) {
         return (bets[_betId].bettor == _owner);
-    }
-
-    function upgradeContract(address _upgradedContractAddress) public onlyCeo whenPaused {
-        super.upgradeContract(_upgradedContractAddress);
-    }
-
-    function _isEventActive(BetEvent storage _event) internal view returns (bool) {
-        return (
-            now > (_event.createTime + _event.activeAfter) &&
-            now < (_event.createTime + _event.endsAfter)
-        );
     }
 
     function _isEventEditable(BetEvent storage _event) internal view returns (bool) {
         return (
             now >= _event.createTime &&
-            now < (_event.createTime + _event.activeAfter
-        ));
+            now < _event.activeAfterTime
+        );
+    }
+
+    function _isEventActive(BetEvent storage _event) internal view returns (bool) {
+        return (
+            now >= _event.activeAfterTime &&
+            now < _event.endsAfterTime
+        );
     }
 
     function _isEventEnded(BetEvent storage _event) internal view returns (bool) {
-        return ((_event.createTime + _event.endsAfter) < now);
+        return _event.endsAfterTime < now;
     }
 
     function _isEventPayable(BetEvent storage _event) internal view returns (bool) {
-        return ((_event.createTime + _event.payableAfter) < now);
+        return _event.payableAfterTime < now;
     }
 
     function _isEventBookmaker(BetEvent storage _event, address _bookmaker) internal view returns (bool) {
