@@ -1,6 +1,17 @@
 pragma solidity 0.4.19;
 
 
+contract Upgradable {
+
+    event ContractUpgrade(address newContract);
+
+    address public newContractAddress;
+
+    function upgradeContract(address _upgradedContractAddress) public {
+        newContractAddress = _upgradedContractAddress;
+    }
+}
+
 contract FairBetAccessControl {
     address public ceoAddress;
     address public cfoAddress;
@@ -76,7 +87,7 @@ contract FairBetAccessControl {
 }
 
 
-contract FairBet is FairBetAccessControl {
+contract FairBet is FairBetAccessControl, Upgradable {
 
     BetEvent[] public events;
 
