@@ -27,26 +27,18 @@ contract FairBetAccessControl is Upgradable {
         Opened
     }
 
-    enum BookmakerStatus {
-        Banned,
-        Allowed,
-        Certified
-    }
-
-    mapping(address => BookmakerStatus) public bookmakers;
-
     modifier onlyCeo {
         require(ceoAddress == msg.sender);
         _;
     }
 
-    modifier onlyBookmakerManager {
-        require(bookmakersManager == msg.sender);
+    modifier onlyCfo {
+        require(cfoAddress == msg.sender);
         _;
     }
 
-    modifier allowedBookmaker {
-        require(uint8(bookmakers[msg.sender]) >= uint8(BookmakerStatus.Allowed));
+    modifier onlyBookmakerManager {
+        require(bookmakersManager == msg.sender);
         _;
     }
 
@@ -93,32 +85,12 @@ contract FairBetAccessControl is Upgradable {
         contractStatus = _newStatus;
     }
 
-    function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
-        bookmakers[_bookmaker] = _newStatus;
-    }
-
     function upgradeContract(address _upgradedContractAddress) public onlyCeo atMostClaim {
         super.upgradeContract(_upgradedContractAddress);
     }
 }
 
-contract FairBetFee is FairBetAccessControl {
-    uint256 public betCodeCreationFee;
-}
-
-contract FairBet is FairBetFee {
-
-    BetEvent[] public events;
-
-    Bet[] public bets;
-
-    bytes16 public constant STD_BET_GROUP = "STD_BET_GROUP";
-
-
-    event DonationReceived(
-        address from,
-        uint256 amount
-    );
+contract FairBetBase is FairBetAccessControl {
 
     event BetEventCreated(
         uint256 id,
@@ -145,6 +117,12 @@ contract FairBet is FairBetFee {
         // Bookmaker is the main responsible of the event
         address bookmaker;
 
+        // Description of the event
+        string description;
+
+        // Bet fee in 1/1000 of bet value on each bet
+        uint16 betFee;
+
         // time bet event has been created in seconds (block timestamp)
         uint64 createTime;
 
@@ -157,8 +135,8 @@ contract FairBet is FairBetFee {
         // delay to award winners and claim prizes
         uint64 payableAfterTime;
 
-        // Description of the event
-        string description;
+        // amount of fee in wei that bookmaker will gain
+        uint256 collectedFees;
 
         // Stores the groups of possible bets. BetGroupCode as key and the bet group data as value
         mapping(bytes16 => BetGroup) betGroups;
@@ -194,6 +172,140 @@ contract FairBet is FairBetFee {
         Denied, Allowed, Winning, Refund
     }
 
+    function _isEventEditable(BetEvent storage _event) internal view returns (bool) {
+        return (
+            now >= _event.createTime &&
+            now < _event.activeAfterTime
+        );
+    }
+
+    function _isEventActive(BetEvent storage _event) internal view returns (bool) {
+        return (
+            now >= _event.activeAfterTime &&
+            now < _event.endsAfterTime
+        );
+    }
+
+    function _isEventEnded(BetEvent storage _event) internal view returns (bool) {
+        return _event.endsAfterTime < now;
+    }
+
+    function _isEventPayable(BetEvent storage _event) internal view returns (bool) {
+        return _event.payableAfterTime < now;
+    }
+
+    function _isEventBookmaker(BetEvent storage _event, address _bookmaker) internal view returns (bool) {
+        return (_event.bookmaker == _bookmaker);
+    }
+
+    function _isBetCodeAllowed(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
+        return (_event.betCodes[_betCode].status == BetCodeStatus.Allowed);
+    }
+
+    function _isBetCodeWinning(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
+        return (_event.betCodes[_betCode].status == BetCodeStatus.Winning);
+    }
+
+    function _isBetCodeRefundable(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
+        return (_event.betCodes[_betCode].status == BetCodeStatus.Refund);
+    }
+}
+
+contract FairBetBookmakers is FairBetBase {
+
+    enum BookmakerStatus {
+        Banned,
+        Allowed,
+        Certified
+    }
+
+    struct Bookmaker {
+        BookmakerStatus status;
+        uint256 earnedFees;
+    }
+
+    mapping(address => BookmakerStatus) public bookmakers;
+
+    modifier allowedBookmaker {
+        require(uint8(bookmakers[msg.sender]) >= uint8(BookmakerStatus.Allowed));
+        _;
+    }
+
+    function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
+        bookmakers[_bookmaker] = _newStatus;
+    }
+}
+
+contract FairBetFee is FairBetBookmakers {
+    uint256 public betEventCreationFee;
+    uint256 public betCodeCreationFee;
+    uint256 public betCreationFee;
+
+    uint256 public collectedFees;
+
+    event BetEventCreationFeeChanged(uint256 newFee);
+    event BetCodeCreationFeeChanged(uint256 newFee);
+    event BetCreationFeeChanged(uint256 newFee);
+
+    function setBetEventCreationFee(uint256 _newFee) external onlyCfo {
+        betEventCreationFee = _newFee;
+        BetEventCreationFeeChanged(_newFee);
+    }
+
+    function setBetCodeCreationFee(uint256 _newFee) external onlyCfo {
+        betCodeCreationFee = _newFee;
+        BetCodeCreationFeeChanged(_newFee);
+    }
+
+    function setBetCreationFee(uint256 _newFee) external onlyCfo {
+        betCreationFee = _newFee;
+        BetCreationFeeChanged(_newFee);
+    }
+
+    function withdrawFees() external onlyCfo {
+        var fees = collectedFees;
+        collectedFees = 0;
+        cfoAddress.transfer(fees);
+    }
+
+    function _payBetEventCreationFee() internal {
+        require(
+            msg.value >= betEventCreationFee &&
+            (collectedFees + msg.value) > collectedFees
+        );
+        collectedFees += msg.value;
+    }
+
+    function _payBetCodeCreationFee(uint8 _quantity) internal {
+        require(
+            msg.value >= (betCodeCreationFee * _quantity) &&
+            (collectedFees + msg.value) > collectedFees
+        );
+        collectedFees += msg.value;
+    }
+
+    function _payBetCreationFee() internal {
+        require(
+            msg.value >= betCodeCreationFee &&
+            (collectedFees + msg.value) > collectedFees
+        );
+        collectedFees += msg.value;
+    }
+}
+
+contract FairBet is FairBetFee {
+
+    BetEvent[] public events;
+
+    Bet[] public bets;
+
+    bytes16 public constant STD_BET_GROUP = "STD_BET_GROUP";
+
+    event DonationReceived(
+        address from,
+        uint256 amount
+    );
+
     /**
      * Constructor set contract creator as CEO, CFO and BookmakersManager
      */
@@ -227,19 +339,23 @@ contract FairBet is FairBetFee {
      */
     function createEvent(
         string _description,
+        uint16 _appliedBetFee,
         uint16 _activeAfter,
         uint16 _endsAfter,
         uint32 _payableAfter,
         bytes16[] _stdAllowedBetCodes
     )
         public
+        payable
         allowedBookmaker
         eventCreationAllowed
         returns (uint256 eventId)
     {
+        _payBetEventCreationFee();
         require((_endsAfter > _activeAfter) && (_payableAfter > uint32(_endsAfter)));
         BetEvent memory newEvent = BetEvent({
             bookmaker: msg.sender,
+            betFee: _appliedBetFee,
             description: _description,
             createTime: uint64(now),
             activeAfterTime: uint64(now) + (_activeAfter * 1 minutes),
@@ -272,6 +388,7 @@ contract FairBet is FairBetFee {
         bytes16[] _betCodesToAllow
     )
     public
+    payable
     eventCreationAllowed
     {
         BetEvent storage currEvent = events[_eventId];
@@ -280,6 +397,8 @@ contract FairBet is FairBetFee {
             (_group != "") &&
             (_betCodesToAllow.length <= 2**8)
         );
+
+        _payBetCodeCreationFee(uint8(_betCodesToAllow.length));
 
         require(
             _isEventBookmaker(currEvent, msg.sender) &&
@@ -434,43 +553,5 @@ contract FairBet is FairBetFee {
      */
     function checkBetOwner(address _owner, uint256 _betId) public claimAllowed view returns (bool) {
         return (bets[_betId].bettor == _owner);
-    }
-
-    function _isEventEditable(BetEvent storage _event) internal view returns (bool) {
-        return (
-            now >= _event.createTime &&
-            now < _event.activeAfterTime
-        );
-    }
-
-    function _isEventActive(BetEvent storage _event) internal view returns (bool) {
-        return (
-            now >= _event.activeAfterTime &&
-            now < _event.endsAfterTime
-        );
-    }
-
-    function _isEventEnded(BetEvent storage _event) internal view returns (bool) {
-        return _event.endsAfterTime < now;
-    }
-
-    function _isEventPayable(BetEvent storage _event) internal view returns (bool) {
-        return _event.payableAfterTime < now;
-    }
-
-    function _isEventBookmaker(BetEvent storage _event, address _bookmaker) internal view returns (bool) {
-        return (_event.bookmaker == _bookmaker);
-    }
-
-    function _isBetCodeAllowed(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
-        return (_event.betCodes[_betCode].status == BetCodeStatus.Allowed);
-    }
-
-    function _isBetCodeWinning(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
-        return (_event.betCodes[_betCode].status == BetCodeStatus.Winning);
-    }
-
-    function _isBetCodeRefundable(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
-        return (_event.betCodes[_betCode].status == BetCodeStatus.Refund);
     }
 }
