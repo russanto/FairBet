@@ -1,20 +1,39 @@
-pragma solidity 0.4.19;
+pragma solidity 0.4.18;
 
 
-contract FairBetAccessControl {
-    address public ceo;
+contract Upgradable {
+
+    event ContractUpgrade(address newContract);
+
+    address public newContractAddress;
+
+    function upgradeContract(address _upgradedContractAddress) public {
+        newContractAddress = _upgradedContractAddress;
+        ContractUpgrade(newContractAddress);
+    }
+}
+
+contract FairBetAccessControl is Upgradable {
+    address public ceoAddress;
+    address public cfoAddress;
     address public bookmakersManager;
 
-    enum BookmakerStatus {
-        Banned,
-        Allowed,
-        Certified
+    ContractStatus public contractStatus = ContractStatus.Opened;
+
+    enum ContractStatus {
+        Paused,
+        BetClaim,
+        BetAllow,
+        Opened
     }
 
-    mapping(address => BookmakerStatus) public bookmakers;
-
     modifier onlyCeo {
-        require(ceo == msg.sender);
+        require(ceoAddress == msg.sender);
+        _;
+    }
+
+    modifier onlyCfo {
+        require(cfoAddress == msg.sender);
         _;
     }
 
@@ -23,51 +42,74 @@ contract FairBetAccessControl {
         _;
     }
 
-    modifier allowedBookmaker {
-        require(uint8(bookmakers[msg.sender]) >= uint8(BookmakerStatus.Allowed));
+    modifier whenPaused {
+        require(contractStatus == ContractStatus.Paused);
+        _;
+    }
+
+    modifier atMostClaim {
+        require(uint8(contractStatus) < 2);
+        _;
+    }
+
+    modifier claimAllowed {
+        require(uint8(contractStatus) > 0);
+        _;
+    }
+
+    modifier betAllowed {
+        require(uint8(contractStatus) > 1);
+        _;
+    }
+
+    modifier eventCreationAllowed {
+        require(uint8(contractStatus) > 2);
         _;
     }
 
     function setCEO(address _newCEO) external onlyCeo {
-        ceo = _newCEO;
+        ceoAddress = _newCEO;
+    }
+
+    function setCFO(address _newCFO) external onlyCeo {
+        cfoAddress = _newCFO;
     }
 
     function setBookmakerManager(address _newBookmakersManager) external onlyCeo {
         bookmakersManager = _newBookmakersManager;
     }
 
-    function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
-        bookmakers[_bookmaker] = _newStatus;
+    function changeContractStatus(ContractStatus _newStatus) external onlyCeo {
+        if (newContractAddress != address(0))
+            require(uint8(_newStatus) < uint(contractStatus));
+        contractStatus = _newStatus;
+    }
+
+    function upgradeContract(address _upgradedContractAddress) public onlyCeo atMostClaim {
+        super.upgradeContract(_upgradedContractAddress);
     }
 }
 
-
-contract FairBet is FairBetAccessControl {
-
-    BetEvent[] public events;
-
-    Bet[] public bets;
-
-    bytes32 public constant STD_BET_GROUP = "STD_BET_GROUP";
+contract FairBetBase is FairBetAccessControl {
 
     event BetEventCreated(
         uint256 id,
         string description,
-        uint256 createTime,
-        uint256 activeAfter,
-        uint256 endsAfter,
-        uint256 payableAfter
+        uint64 createTime,
+        uint64 activeAfterTime,
+        uint64 endsAfterTime,
+        uint64 payableAfterTime
     );
 
     event BetGroupAllowed(
         uint256 eventId,
-        bytes32 group,
-        bytes32[] betCodesToAllow
+        bytes16 group,
+        bytes16[] betCodesToAllow
     );
 
     event BetGroupGetPayable(
         uint256 eventId,
-        bytes32 winnerBetCode,
+        bytes16 winnerBetCode,
         bool refund
     );
 
@@ -78,44 +120,50 @@ contract FairBet is FairBetAccessControl {
         // Description of the event
         string description;
 
-        // time bet event has been created
-        uint256 createTime;
+        // Bet fee in wei applied on each bet created
+        uint256 betFee;
 
-        // delay to begin accepting bets
-        uint256 activeAfter;
+        // time bet event has been created in seconds (block timestamp)
+        uint64 createTime;
+
+        // delay from createTime to begin accepting bets
+        uint64 activeAfterTime;
 
         // delay to stop accepting bets
-        uint256 endsAfter;
+        uint64 endsAfterTime;
 
         // delay to award winners and claim prizes
-        uint256 payableAfter;
+        uint64 payableAfterTime;
+
+        // amount of fee in wei that bookmaker will gain
+        uint256 collectedFees;
 
         // Stores the groups of possible bets. BetGroupCode as key and the bet group data as value
-        mapping(bytes32 => BetGroup) betGroups;
+        mapping(bytes16 => BetGroup) betGroups;
 
         // Stores the possible bets data. BetCode as key and the BetCode data as value
-        mapping(bytes32 => BetCode) betCodes;
+        mapping(bytes16 => BetCode) betCodes;
 
     }
 
     struct Bet {
-        address bettor;
         uint256 eventId;
-        bytes32 betCode;
         uint256 amount;
-        uint256 createTime;
+        uint64 createTime;
+        address bettor;
         bool payed;
+        bytes16 betCode;
     }
 
     struct BetGroup {
-        bytes32[] codes;
+        bytes16[] codes;
         uint256 amountBet;
         uint256 amountReturned;
-        bytes32 winningBetCode;
+        bytes16 winningBetCode;
     }
 
     struct BetCode {
-        bytes32 group;
+        bytes16 group;
         uint256 amountBet;
         BetCodeStatus status;
     }
@@ -124,81 +172,381 @@ contract FairBet is FairBetAccessControl {
         Denied, Allowed, Winning, Refund
     }
 
-    function FairBet() public {
-        ceo = msg.sender;
-        bookmakersManager = msg.sender;
-    }
+    BetEvent[] public events;
 
-    function createEvent(
+    Bet[] public bets;
+
+    function _createEvent(
         string _description,
-        uint256 _activeAfter,
-        uint256 _endsAfter,
-        uint256 _payableAfter,
-        bytes32[] _stdAllowedBetCodes
+        uint256 _appliedBetFee,
+        uint16 _activeAfter,
+        uint16 _endsAfter,
+        uint32 _payableAfter
     )
-        public
-        allowedBookmaker
+        internal
         returns (uint256 eventId)
     {
-        require((_endsAfter > _activeAfter) && (_payableAfter > _endsAfter));
+        require((_endsAfter > _activeAfter) && (_payableAfter > uint32(_endsAfter)));
         BetEvent memory newEvent = BetEvent({
             bookmaker: msg.sender,
+            betFee: _appliedBetFee,
             description: _description,
-            createTime: now,
-            activeAfter: _activeAfter,
-            endsAfter: _endsAfter,
-            payableAfter: _payableAfter
+            createTime: uint64(now),
+            activeAfterTime: uint64(now) + (_activeAfter * 1 minutes),
+            endsAfterTime: uint64(now) + (_endsAfter * 1 minutes),
+            payableAfterTime: uint64(now) + (_payableAfter * 1 minutes),
+            collectedFees: 0
         });
         eventId = events.push(newEvent) - 1;
         BetEventCreated(eventId, _description, newEvent.createTime, _activeAfter, _endsAfter, _payableAfter);
-        allowBetGroup(eventId, STD_BET_GROUP, _stdAllowedBetCodes);
     }
 
-    function allowBetGroup(uint256 _eventId, bytes32 _group, bytes32[] _betCodesToAllow) public {
-        require(_isEventBookmaker(_eventId, msg.sender));
-        require(_group != "");
-        require(_betCodesToAllow.length <= 2**8);
+    function _allowBetGroup(
+        uint256 _eventId,
+        BetEvent storage _event,
+        bytes16 _group,
+        bytes16[] _betCodesToAllow
+    )
+    internal
+    {
+        // Verify given eventId is related to the given event
+        require(
+            keccak256(events[_eventId].bookmaker, events[_eventId].description, events[_eventId].createTime) == keccak256(_event.bookmaker, _event.description, _event.createTime)
+        );
 
-        BetEvent storage currEvent = events[_eventId];
-        require(_isEventEditable(_eventId));
+        require(
+            (_group != "") &&
+            (_betCodesToAllow.length <= 2**8)
+        );
 
-        BetGroup storage currBetGroup = currEvent.betGroups[_group];
+        BetGroup storage currBetGroup = _event.betGroups[_group];
 
         // Ensure that a group with already bet set can't be modified
         require(currBetGroup.amountBet == 0);
 
         for (uint8 i = 0; i < _betCodesToAllow.length; i++) {
             currBetGroup.codes.push(_betCodesToAllow[i]);
-            currEvent.betCodes[_betCodesToAllow[i]].group = _group;
-            currEvent.betCodes[_betCodesToAllow[i]].status = BetCodeStatus.Allowed;
+            _event.betCodes[_betCodesToAllow[i]].group = _group;
+            _event.betCodes[_betCodesToAllow[i]].status = BetCodeStatus.Allowed;
         }
         BetGroupAllowed(_eventId, _group, _betCodesToAllow);
     }
 
-    function bet(uint256 _eventId, bytes32 _betCode) public payable returns (uint256 betId) {
-        require(_isEventActive(_eventId));
-        require(_isBetCodeAllowed(_eventId, _betCode));
+    function _isEventEditable(BetEvent storage _event) internal view returns (bool) {
+        return (
+            now >= _event.createTime &&
+            now < _event.activeAfterTime
+        );
+    }
+
+    function _isEventActive(BetEvent storage _event) internal view returns (bool) {
+        return (
+            now >= _event.activeAfterTime &&
+            now < _event.endsAfterTime
+        );
+    }
+
+    function _isEventEnded(BetEvent storage _event) internal view returns (bool) {
+        return _event.endsAfterTime < now;
+    }
+
+    function _isEventPayable(BetEvent storage _event) internal view returns (bool) {
+        return _event.payableAfterTime < now;
+    }
+
+    function _isEventBookmaker(BetEvent storage _event, address _bookmaker) internal view returns (bool) {
+        return (_event.bookmaker == _bookmaker);
+    }
+
+    function _isBetCodeAllowed(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
+        return (_event.betCodes[_betCode].status == BetCodeStatus.Allowed);
+    }
+
+    function _isBetCodeWinning(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
+        return (_event.betCodes[_betCode].status == BetCodeStatus.Winning);
+    }
+
+    function _isBetCodeRefundable(BetEvent storage _event, bytes16 _betCode) internal view returns (bool) {
+        return (_event.betCodes[_betCode].status == BetCodeStatus.Refund);
+    }
+}
+
+contract FairBetBookmakers is FairBetBase {
+
+    enum BookmakerStatus {
+        Banned,
+        Allowed,
+        Certified
+    }
+
+    struct Bookmaker {
+        BookmakerStatus status;
+        uint256 earnedFees;
+    }
+
+    mapping(address => BookmakerStatus) public bookmakers;
+
+    modifier onlyBookmakers {
+        require(uint8(bookmakers[msg.sender]) >= uint8(BookmakerStatus.Allowed));
+        _;
+    }
+
+    function setBookmakerStatus(address _bookmaker, BookmakerStatus _newStatus) external onlyBookmakerManager {
+        bookmakers[_bookmaker] = _newStatus;
+    }
+}
+
+contract FairBetFee is FairBetBookmakers {
+    uint256 public betEventCreationFee;
+    uint256 public betCodeCreationFee;
+    uint256 public bookmakerWithdrawalFee;
+    //uint256 public betCreationFee;
+
+    uint256 public collectedFees;
+    uint256 public donations;
+
+    event DonationReceived(
+        address from,
+        uint256 amount
+    );
+
+    event BetEventCreationFeeChanged(uint256 newFee);
+    event BetCodeCreationFeeChanged(uint256 newFee);
+    //event BetCreationFeeChanged(uint256 newFee);
+    event BookmakerWithdrawalFeeChanged(uint256 newFee);
+
+    function setBetEventCreationFee(uint256 _newFee) external onlyCfo {
+        betEventCreationFee = _newFee;
+        BetEventCreationFeeChanged(_newFee);
+    }
+
+    function setBetCodeCreationFee(uint256 _newFee) external onlyCfo {
+        betCodeCreationFee = _newFee;
+        BetCodeCreationFeeChanged(_newFee);
+    }
+
+    //function setBetCreationFee(uint256 _newFee) external onlyCfo {
+    //    betCreationFee = _newFee;
+    //    BetCreationFeeChanged(_newFee);
+    //}
+
+    function setBookmakerWithdrawalFee(uint256 _newFee) external onlyCfo {
+        bookmakerWithdrawalFee = _newFee;
+        BookmakerWithdrawalFeeChanged(_newFee);
+    }
+
+    function withdrawFees() external onlyCfo {
+        var fees = collectedFees;
+        collectedFees = 0;
+        cfoAddress.transfer(fees);
+    }
+
+    function withdrawDonations() external onlyCfo {
+        var withdraw = donations;
+        donations = 0;
+        cfoAddress.transfer(withdraw);
+    }
+
+    function _withdrawBetEventFees(BetEvent storage _event) internal {
+        require(_event.bookmaker == msg.sender);
+        var withdraw = _event.collectedFees;
+        _event.collectedFees = 0;
+        msg.sender.transfer(withdraw);
+    }
+
+    function _payBetEventCreationFee(uint256 _credit) internal returns (uint256 _newCredit) {
+        _newCredit = _credit - betEventCreationFee;
+        require(
+            _newCredit <= _credit &&
+            (collectedFees + betEventCreationFee) >= collectedFees
+        );
+        collectedFees += betEventCreationFee;
+    }
+
+    function _payBetCodeCreationFee(uint256 _credit, uint256 _quantity) internal returns (uint256 _newCredit) {
+        var fee = betCodeCreationFee * _quantity;
+        _newCredit = _credit - fee;
+        require(
+            _newCredit <= _credit &&
+            (collectedFees + fee) >= collectedFees
+        );
+        collectedFees += fee;
+    }
+
+    //function _payBetCreationFee(uint256 _credit) internal returns (uint256 newCredit) {
+    //    newCredit = _credit - betCreationFee;
+    //    require(
+    //        newCredit <= _credit &&
+    //        (collectedFees + betCreationFee) > collectedFees
+    //    );
+    //    collectedFees += betCreationFee;
+    //}
+
+    function _payBookmakerFee(BetEvent storage _event, uint256 _betAmount) internal returns (uint256 _newCredit) {
+        var fee = _event.betFee;
+        _newCredit = _betAmount - fee;
+        require(
+            _newCredit <= _betAmount &&
+            (_event.collectedFees + fee) >= _event.collectedFees
+        );
+        _event.collectedFees += fee;
+    }
+
+    function _registerDonation(uint256 _amount) internal {
+        DonationReceived(msg.sender, _amount);
+        require((donations + _amount) > donations);
+        donations += _amount;
+    }
+}
+
+contract FairBet is FairBetFee {
+
+    bytes16 public constant STD_BET_GROUP = "STD_BET_GROUP";
+
+    /**
+     * Constructor set contract creator as CEO, CFO and BookmakersManager
+     */
+    function FairBet() public {
+        ceoAddress = msg.sender;
+        cfoAddress = msg.sender;
+        bookmakersManager = msg.sender;
+    }
+
+    /**
+     * Function to create events on which bet.
+     * Only bookmakers allowed by bookmakers manager can create events.
+     *
+     * A default bet-group is created. Bet-groups are immutable and can only be
+     * overwritten if and only if there aren't bets on them
+     *
+     * @notice Provide meaningful bet-codes because, with the eventId, they're enough to place bets.
+     * @notice Bet-codes must be unique inside the same event, regardless the group they belong to.
+     *
+     * @param _description A custom description string for the event
+     * @param _activeAfter # of minutes starting from now when begin accepting bets
+     * @param _endsAfter # of minutes starting from now when end accepting bets
+     * @param _payableAfter # of minutes starting from now when bettor can select winner bet-code
+     * @param _stdAllowedBetCodes list of bet-code to assign to a std group for the event
+     *
+     * @return eventId the ID of the newly created event
+     */
+    function createEvent(
+        string _description,
+        uint256 _appliedBetFee,
+        uint16 _activeAfter,
+        uint16 _endsAfter,
+        uint32 _payableAfter,
+        bytes16[] _stdAllowedBetCodes
+    )
+        public
+        payable
+        onlyBookmakers
+        eventCreationAllowed
+        returns (uint256 eventId)
+    {
+        var feeCredit = _payBetEventCreationFee(msg.value);
+        eventId = _createEvent(_description, _appliedBetFee, _activeAfter, _endsAfter, _payableAfter);
+        // checks on length will be done in _allowBetGroup
+        feeCredit = _payBetCodeCreationFee(feeCredit, _stdAllowedBetCodes.length);
+        _allowBetGroup(eventId, events[eventId], STD_BET_GROUP, _stdAllowedBetCodes);
+        if (feeCredit > 0)
+            _registerDonation(feeCredit);
+    }
+
+    /**
+     * Bookmakers of the BetEvent can create multiple bet-groups for their event.
+     * Bet-groups are immutable and can only be overwritten if and only if
+     * there aren't bets on them
+     * Call again this function with the same group-code to overwrite that group
+     *
+     * @notice Bet-group code that you provide here is not necessary for placing bets.
+     *  Bet-group code is only necessary if you want to overwrite that group of bet-codes.
+     * @notice Provide meaningful bet-codes because, with the eventId, they're enough to place bets.
+     * @notice Bet-codes must be unique inside the same event, regardless the group they belong to.
+     *
+     * @param _eventId BetEvent ID to which add Bet-groups
+     * @param _group A code to assign to the group. It must be unique for the event unless you want to overwrite an existing bet-group.
+     * @param _betCodesToAllow List of codes on which bettor can bet.
+     */
+    function allowBetGroup(
+        uint256 _eventId,
+        bytes16 _group,
+        bytes16[] _betCodesToAllow
+    )
+    public
+    payable
+    eventCreationAllowed
+    {
         BetEvent storage currEvent = events[_eventId];
+
+        var feeCredit = _payBetCodeCreationFee(msg.value, _betCodesToAllow.length);
+
+        require(
+            _isEventBookmaker(currEvent, msg.sender) &&
+            _isEventEditable(currEvent)
+        );
+
+        _allowBetGroup(_eventId, currEvent, _group, _betCodesToAllow);
+
+        if (feeCredit > 0)
+            _registerDonation(feeCredit);
+    }
+
+    /**
+     * Place a bet on the event on the provided bet-code
+     *
+     * @notice Please, keep in mind or store the bet ID returned from this function. It is necessary to claim your win or refound.
+     *
+     * @param _eventId The event ID on which place the bet
+     * @param _betCode The code of the bet to place
+     *
+     * @return betId Bet ID of the successfully placed bet
+     */
+    function bet(uint256 _eventId, bytes16 _betCode) public payable betAllowed returns (uint256 betId) {
+        BetEvent storage currEvent = events[_eventId];
+
+        var _betAmount = _payBookmakerFee(currEvent, msg.value);
+
+        require(
+            _isEventActive(currEvent) &&
+            _isBetCodeAllowed(currEvent, _betCode)
+        );
         betId = bets.push(Bet({
             bettor: msg.sender,
             eventId: _eventId,
             betCode: _betCode,
-            amount: msg.value,
-            createTime: now,
+            amount: _betAmount,
+            createTime: uint64(now),
             payed: false
         })) - 1;
-        currEvent.betGroups[currEvent.betCodes[_betCode].group].amountBet += msg.value;
-        currEvent.betCodes[_betCode].amountBet += msg.value;
+        currEvent.betGroups[currEvent.betCodes[_betCode].group].amountBet += _betAmount;
+        currEvent.betCodes[_betCode].amountBet += _betAmount;
     }
 
-    function awardWin(uint256 _eventId, bytes32 _betCode) public returns (bool) {
+    /**
+     * Declares a bet-code winning for a bet-group and allow related bets to claim their win.
+     * Be careful because this function operation can't be undone
+     *
+     * @notice ONLY 1 bet-code can be awarded to be winning for each bet-group.
+     *
+     * @param _eventId Your event ID
+     * @param _betCode Winning bet-code
+     *
+     * @return true if there were bets on the winning bet-code: this will allow win claiming
+     *  false if there weren't bets on the winning bet-code: this will allow bet refound for losers
+     *
+     */
+    function awardWin(uint256 _eventId, bytes16 _betCode) public claimAllowed returns (bool) {
+        BetEvent storage currEvent = events[_eventId];
+
         require(
-            _isEventPayable(_eventId) &&
-            _isEventBookmaker(_eventId, msg.sender) &&
-            _isBetCodeAllowed(_eventId, _betCode)
+            _isEventPayable(currEvent) &&
+            _isEventBookmaker(currEvent, msg.sender) &&
+            _isBetCodeAllowed(currEvent, _betCode)
         );
 
-        BetEvent storage currEvent = events[_eventId];
+        _withdrawBetEventFees(currEvent);
+
         BetCode storage winningBetCode = currEvent.betCodes[_betCode];
 
         // Checks that there isn't an already awarded bet-code for his group
@@ -221,14 +569,19 @@ contract FairBet is FairBetAccessControl {
         }
     }
 
-    function claimWin(uint256 _betId) public {
+    /**
+     * Called by bettor who wants to claim for his winning bet.
+     *
+     * @param _betId Unique bet ID obtained when bet was placed
+     */
+    function claimWin(uint256 _betId) public claimAllowed {
 
         Bet storage currBet = bets[_betId];
         BetEvent storage currEvent = events[currBet.eventId];
 
         // Bet code must be marked as winning and checks bet owner
         require(
-            _isBetCodeWinning(currBet.eventId, currBet.betCode) &&
+            _isBetCodeWinning(currEvent, currBet.betCode) &&
             checkBetOwner(msg.sender, _betId) &&
             !currBet.payed
         );
@@ -245,14 +598,19 @@ contract FairBet is FairBetAccessControl {
         msg.sender.transfer(reward);
     }
 
-    function claimRefund(uint256 _betId) public {
+    /**
+     * Called by bettor who wants to claim for his refound when no one bet on the winning bet-code.
+     *
+     * @param _betId Unique bet ID obtained when bet was placed
+     */
+    function claimRefund(uint256 _betId) public claimAllowed {
 
         Bet storage currBet = bets[_betId];
         BetEvent storage currEvent = events[currBet.eventId];
 
         // Bet code must be marked as refundable and checks bet owner
         require(
-            _isBetCodeRefundable(currBet.eventId, currBet.betCode) &&
+            _isBetCodeRefundable(currEvent, currBet.betCode) &&
             checkBetOwner(msg.sender, _betId) &&
             !currBet.payed
         );
@@ -264,49 +622,15 @@ contract FairBet is FairBetAccessControl {
         msg.sender.transfer(currBet.amount);
     }
 
-    function checkBetOwner(address _owner, uint256 _betId) public view returns (bool) {
+    /**
+     * Check that address is the owner of the provided bet ID
+     *
+     * @param _owner the address to verify
+     * @param _betId the ID of the bet to check
+     *
+     * @return true if address is owner, otherwise false
+     */
+    function checkBetOwner(address _owner, uint256 _betId) public claimAllowed view returns (bool) {
         return (bets[_betId].bettor == _owner);
-    }
-
-    function _isEventActive(uint256 _eventId) internal view returns (bool) {
-        BetEvent storage currEvent = events[_eventId];
-        return (
-            now > (currEvent.createTime + currEvent.activeAfter) &&
-            now < (currEvent.createTime + currEvent.endsAfter)
-        );
-    }
-
-    function _isEventEditable(uint256 _eventId) internal view returns (bool) {
-        BetEvent storage currEvent = events[_eventId];
-        return (
-            now >= currEvent.createTime &&
-            now < (currEvent.createTime + currEvent.activeAfter
-        ));
-    }
-
-    function _isEventEnded(uint256 _eventId) internal view returns (bool) {
-        BetEvent storage currEvent = events[_eventId];
-        return ((currEvent.createTime + currEvent.endsAfter) < now);
-    }
-
-    function _isEventPayable(uint256 _eventId) internal view returns (bool) {
-        BetEvent storage currEvent = events[_eventId];
-        return ((currEvent.createTime + currEvent.payableAfter) < now);
-    }
-
-    function _isEventBookmaker(uint256 _eventId, address _bookmaker) internal view returns (bool) {
-        return (events[_eventId].bookmaker == _bookmaker);
-    }
-
-    function _isBetCodeAllowed(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
-        return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Allowed);
-    }
-
-    function _isBetCodeWinning(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
-        return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Winning);
-    }
-
-    function _isBetCodeRefundable(uint256 _eventId, bytes32 _betCode) internal view returns (bool) {
-        return (events[_eventId].betCodes[_betCode].status == BetCodeStatus.Refund);
     }
 }
